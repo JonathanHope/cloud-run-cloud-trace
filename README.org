@@ -1,0 +1,49 @@
+* Overview
+
+It was a lot harder than I expected getting Cloud Run and Cloud Trace to work together, so I put together this example repo to hopefully save someone else some time.
+
+* Objective
+
+Export OpenTelemetry traces to Cloud Trace from a Node.js app running in Cloud Run.
+
+* Difficulties
+
+These were some of the difficulties I encountered trying to solve this.
+
+** Import Ordering
+
+I noticed that some traces would be missing while building the tracing out locally. I found out that it was caused by this bug: https://github.com/open-telemetry/opentelemetry-js/issues/3796. To get around it you have to be very particular about your import order. You need to import and immediately instantiate the instrumentation libraries before anything else:
+
+#+begin_src typescript
+import { HttpInstrumentation } from "@opentelemetry/instrumentation-http";
+const httpInstrumentation = new HttpInstrumentation();
+#+end_src
+
+** Serverless
+
+Cloud Run is serverless so you can't trust that the instance is around after a response has been returned. This runs counter to how OpenTelemetry is usually implemented where it batches up traces before sending them. To get around it you need to write all of the traces before the response is returned. For instance:
+
+#+begin_src typescript
+server.addHook("onResponse", async () => {
+  try {
+    await provider.forceFlush();
+  } catch (e) {
+    logger.warn(e);
+  }
+});
+#+end_src
+
+** Memory Leak and Lost Traces
+
+The first attempt at this I deployed used ~@google-cloud/opentelemetry-cloud-trace-exporter~. I ran into a couple of issues with it:
+
+ - Containers were consistently running out of memory and crashing.
+ - The traces would look good for the first few hours, but then begin to stop being collected as time went on
+
+After a lot of trial and error I found that is caused by writing the spans directly using ~@google-cloud/opentelemetry-cloud-trace-exporter~. I switched to writing the spans out over GRPC to to a sidecar collector as documented here: https://cloud.google.com/run/docs/tutorials/custom-metrics-sidecar. I believe I hit this bug: https://github.com/open-telemetry/opentelemetry-js/issues/3740.
+
+* Example
+
+This should be a complete example. There is an API image in ~api~ that will need to be built (~docker build...~), and pushed into Artifact Registry. You will also need to build the collector (~docker build ...~), and push that into Artifact Registry as well.
+
+Form there you ~terraform init && terraform apply~ the Terraform in ~terraform~. That will deploy the API with a sidecar collector to Cloud Run.
